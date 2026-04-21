@@ -29,32 +29,44 @@ interface CourseProgress {
 
 const STORAGE_KEY = 'english-course-progress';
 
+const defaultProgress: CourseProgress = {
+  xp: 0,
+  streak: 0,
+  lastActive: '',
+  wordsMastered: [],
+  grammarCompleted: [],
+  challengesCompleted: 0,
+  bestChallengeScore: 0,
+  totalCorrect: 0,
+  totalAnswered: 0,
+};
+
+// Module-level cache so getSnapshot always returns the same ref if nothing changed
+let cachedProgress: CourseProgress = defaultProgress;
+let cachedRaw = '';
+
 function getDefaultProgress(): CourseProgress {
-  return {
-    xp: 0,
-    streak: 0,
-    lastActive: '',
-    wordsMastered: [],
-    grammarCompleted: [],
-    challengesCompleted: 0,
-    bestChallengeScore: 0,
-    totalCorrect: 0,
-    totalAnswered: 0,
-  };
+  return defaultProgress;
 }
 
 function readProgressFromStorage(): CourseProgress {
-  if (typeof window === 'undefined') return getDefaultProgress();
+  if (typeof window === 'undefined') return defaultProgress;
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return JSON.parse(stored);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? '';
+    if (raw === cachedRaw) return cachedProgress;
+    cachedRaw = raw;
+    cachedProgress = raw ? JSON.parse(raw) : defaultProgress;
+    return cachedProgress;
   } catch { /* ignore */ }
-  return getDefaultProgress();
+  return defaultProgress;
 }
 
 function saveProgress(progress: CourseProgress) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
+    const raw = JSON.stringify(progress);
+    cachedRaw = raw;
+    cachedProgress = progress;
+    localStorage.setItem(STORAGE_KEY, raw);
   } catch { /* ignore */ }
 }
 
@@ -64,19 +76,29 @@ function subscribeToStorage(callback: () => void) {
   return () => window.removeEventListener('storage', callback);
 }
 
+// Module-level listener counter so updates from same tab re-render consumers
+let listeners = new Set<() => void>();
+function emitChange() { listeners.forEach((fn) => fn()); }
+function subscribeToProgress(callback: () => void) {
+  listeners.add(callback);
+  window.addEventListener('storage', callback);
+  return () => {
+    listeners.delete(callback);
+    window.removeEventListener('storage', callback);
+  };
+}
+
 export function useCourseProgress() {
-  const progress = useSyncExternalStore(subscribeToStorage, readProgressFromStorage, getDefaultProgress);
-  const [, setVersion] = useState(0);
+  const progress = useSyncExternalStore(subscribeToProgress, readProgressFromStorage, getDefaultProgress);
 
   const updateProgress = useCallback((updater: (prev: CourseProgress) => CourseProgress) => {
     const current = readProgressFromStorage();
     const next = updater(current);
     saveProgress(next);
-    // Trigger re-render by bumping version (storage event won't fire for same tab)
-    setVersion((v) => v + 1);
+    emitChange();
   }, []);
 
-  // Update streak on first client render via microtask
+  // Update streak on first client render
   const streakInit = useRef(false);
   useEffect(() => {
     if (streakInit.current) return;
@@ -88,8 +110,7 @@ export function useCourseProgress() {
       yesterday.setDate(yesterday.getDate() - 1);
       const newStreak = current.lastActive === yesterday.toDateString() ? current.streak + 1 : 1;
       saveProgress({ ...current, lastActive: today, streak: newStreak });
-      // Schedule re-render outside of effect sync context
-      setTimeout(() => setVersion((v) => v + 1), 0);
+      emitChange();
     }
   }, []);
 
